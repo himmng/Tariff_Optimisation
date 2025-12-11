@@ -1,0 +1,437 @@
+Below I deliver all four requested artefacts in full detail so you can move immediately from concept to implementation. Each section is self-contained and actionable:
+
+Full ML architecture diagram (text + component list) — logical architecture and data flow.
+
+Full technical design document for the POC — scope, data schema, interfaces, security, acceptance criteria, risks.
+
+Step-by-step modelling workflow — exact steps, algorithms, hyperparameters, validation strategy, and evaluation metrics.
+
+Python pseudocode / implementation template — runnable notebook outline, file layout, key functions, example code snippets for training, imputation, bill simulation and optimisation.
+
+1. ML architecture — logical diagram & component list
+
+Below is a textual representation of the architecture (suitable for turning into a diagram). Each component name is followed by its purpose and inputs/outputs.
+
+[Data Sources]
+  ├─ Billing System (A)                -> monthly_totals.csv, customers.csv
+  ├─ Advanced Meter Interval Data (B)  -> smart_intervals.parquet
+  ├─ Network Data (E)                  -> feeder_loads.parquet, transformer_specs.csv
+  ├─ Tech Adoption (D)                 -> pv_ev_battery.csv
+  ├─ Weather APIs / Historical (External) -> weather_hourly.csv
+  └─ Regulatory Data (C)               -> era_indicators.xlsx
+
+       ↓ Ingest/ETL (Airflow / Prefect)
+[Data Lake / Feature Store]
+  ├─ Raw zone (immutable)
+  ├─ Staging (cleaned, deduped)
+  └─ Feature store (customer_features, hourly_features, feeder_features)
+
+       ↓ Batch & Stream Processing
+[Preprocessing Services]
+  ├─ Metering normalisation (timezone, daylight savings)
+  ├─ Missing-value imputation (weather, meter gaps)
+  ├─ Aggregate feeders/substations
+  └─ Joiner: attach customer meta to interval rows
+
+       ↓ Model Training / Serving
+[Model Layer]
+  ├─ Clustering Service
+  │    • Purpose: cluster smart-meter load shapes → archetypes
+  │    • Output: cluster_id per customer
+  ├─ Forecasting Models
+  │    • Hourly demand per customer/cluster (LightGBM + LSTM hybrid)
+  │    • Probabilistic outputs (quantiles)
+  ├─ Elasticity Estimator
+  │    • Econometric & causal inference (difference-in-difference / IV)
+  │    • Output: elasticity by cluster/time-of-day
+  ├─ Imputation Service (for old meters)
+  │    • Uses forecast model + scaling / hierarchical posterior sampling
+  │    • Output: synthetic hourly profiles & uncertainty
+  └─ Tariff Optimiser
+       • CVXPY / Gurobi solver
+       • Inputs: predicted demand distributions, elasticities, network cost function, regulatory constraints
+       • Output: tariff parameter set(s) + Pareto frontier
+
+       ↓ Simulation & Reporting
+[Simulation & Evaluation]
+  ├─ Monte Carlo scenario engine (weather, EV uptake, PV growth)
+  ├─ Bill simulator (hourly → tariff rules → bills)
+  └─ KPIs: revenue adequacy, peak reduction, fairness metrics, number of customers >X% bill change
+
+       ↓ APIs & Dashboards
+[UI / Ops]
+  ├─ Web dashboard (Dash / React) showing tariff scenarios & impacts
+  ├─ API endpoints for forecast, impute, simulate, optimise
+  └─ Regulatory report generator (PDF/Excel)
+
+       ↓ Monitoring
+[Monitoring & Retraining]
+  ├─ Data quality checks
+  ├─ Drift detection (load shape, weather-response)
+  ├─ Model retrain scheduler
+  └─ Audit & explainability logs (SHAP, feature importance)
+
+
+Deployment options
+
+Kubernetes (preferred) with model containers.
+
+Feature store: Feast or S3 + Delta Lake.
+
+Orchestration: Airflow / Prefect for batch pipelines.
+
+Serving: FastAPI + GPU nodes for heavy models (LSTM/Transformer); LightGBM served on CPU.
+
+2. Technical design document for the POC
+2.1 Objective
+
+Build a POC system that:
+
+Produces synthetic hourly profiles for old-meter customers using smart-meter-trained models.
+
+Simulates monthly bills for candidate tariffs (including existing TOU & advanced designs).
+
+Produces optimised tariff parameter sets balancing revenue adequacy, peak reduction and fairness under WA regulatory constraints.
+
+2.2 Scope (POC)
+
+Data: use representative sample (50k smart-meter customers across varied feeders; 200k old-meter customers aggregated or sampled).
+
+Time-horizon: past 2 years of data for training + next 12 months of scenario simulation.
+
+Tariff space: fixed charge + three time bands (peak, shoulder, off-peak) initially; extendable to TOU bands and capacity subscription.
+
+Deliverables: model notebooks, optimisation module, dashboard with scenario generator, regulatory report template.
+
+2.3 Data schemas (example)
+customers.csv
+
+customer_id (anon)
+
+postcode
+
+feeder_id
+
+dwelling_type (house/apartment)
+
+concession_flag (Y/N)
+
+connection_date
+
+tariff_current (A1, MiddaySaver, EVAddOn, Legacy)
+
+pv_capacity_kw (nullable)
+
+battery_capacity_kwh (nullable)
+
+ev_plan_flag (Y/N)
+
+smart_intervals.parquet
+
+customer_id
+
+datetime (UTC)
+
+import_kwh
+
+export_kwh
+
+power_kw (instantaneous or averaged)
+
+meter_type
+
+quality_flag
+
+monthly_totals.csv
+
+customer_id
+
+bill_month (YYYY-MM)
+
+billed_kwh
+
+billed_amount
+
+weather_hourly.csv
+
+datetime
+
+postcode (or nearest station id)
+
+temp_c
+
+humidity_pct
+
+ghi_w_m2 (global horizontal irradiance)
+
+wind_m_s
+
+feeder_loads.parquet
+
+feeder_id
+
+datetime
+
+aggregated_kwh
+
+transformer_capacity_kw
+
+2.4 Functional interfaces
+
+Data ingestion API: REST endpoint to submit raw files or SFTP drop.
+
+Model inference API: /infer/hourly_profile?customer_id=xxx&period=2025-01. Returns hourly kWh vector + quantiles.
+
+Optimiser API: /optimise POST with constraints & objective weights → returns tariff parameter set + KPIs.
+
+Dashboard: scenario builder (temperature anomaly %, EV uptake rate, PV growth), show Pareto frontier.
+
+2.5 Security & privacy
+
+Customer IDs pseudonymised; definitive mapping stored in secure vault.
+
+Data at rest encrypted (AES-256).
+
+Access control: RBAC, least privilege.
+
+Audit logs for all model inferences and optimisation runs (for regulatory audit).
+
+2.6 Acceptance criteria
+
+Imputation accuracy: when tested on hold-out smart-meter customers (simulate monthly-only), recover hourly peak within MAE ≤ 15% of actual peak-hour demand and monthly total RMSE ≤ 5% (targets adjustable).
+
+Optimiser respects revenue adequacy constraint: expected revenue ≥ 95% of target across baseline scenarios.
+
+Fairness: ≤ X% (configurable, default 5%) of concession customers see >10% bill increase under selected tariffs.
+
+Latency: inference API returns hourly profile for one customer in < 5s (batch modes allowed).
+
+2.7 Risks & mitigations
+
+Selection bias of smart-meter cohort: use hierarchical models with feeder-level effects; reweight training samples to match demographic distribution.
+
+Regulatory concern on differential pricing: include bill-protection and opt-in advanced products. Prepare regulator-ready documentation.
+
+Data gaps: fallback to feeder-level scaling and add uncertainty.
+
+Model drift: automated drift detection and scheduled retraining.
+
+2.8 Timeline (POC)
+
+Week 0–2: Data ingestion, sample selection, ETL.
+
+Week 3–6: Clustering + forecasting baseline model + imputation pipeline.
+
+Week 7–9: Elasticity estimation + simple optimisation (CVXPY).
+
+Week 10–12: Monte Carlo simulator + dashboard + regulatory report templates.
+
+Week 13: Handover, documentation, demo.
+
+2.9 Team & resources
+
+Data engineer (1 FTE) — ETL, feature store.
+
+ML engineer (1 FTE) — modelling & validation.
+
+Optimisation specialist (0.5 FTE) — CVXPY/Gurobi modelling.
+
+Product/Regulatory lead (0.5 FTE) — constraints, acceptance.
+
+DevOps (0.5 FTE) — deployment pipeline.
+
+3. Step-by-step modelling workflow (detailed)
+
+This is the exact ordered workflow with recommended algorithms, hyperparameters, validation, and metrics.
+
+Step 0 — Data audit & exploratory analysis
+
+Run counts, completeness, timestamps, timezone consistency.
+
+Compute coverage of smart meters by postcode and feeder.
+
+Plot sample daily shapes for representative customers (weekdays vs weekends, seasons).
+
+Metric: fraction of customers with gaps > 10% of hours in period.
+
+Step 1 — Clustering & archetype discovery
+
+Purpose: reduce heterogeneity; train models per archetype.
+
+Procedure:
+
+For smart-meter customers, compute normalized daily load shapes (e.g., mean weekday shape, mean weekend shape). Normalise by daily mean or peak to focus on shape.
+
+Features: 24-hour vector, day-of-week differences, seasonal average.
+
+Algorithm: K-Means (k=8–12) or HDBSCAN (if variable cluster sizes). Use DTW distance if alignment matters (but slower).
+
+Validation: silhouette score + visual inspection.
+
+Assign cluster_id to each smart-meter customer.
+
+Deliverable: cluster centroids (archetype profiles).
+
+Step 2 — Feature engineering
+
+Temporal features
+
+hour_sin, hour_cos (to encode cyclical hour)
+
+dayofweek dummies, is_weekend, holiday_flag
+
+rolling lags: lag1, lag24, lag168 (last hour, last day, last week means)
+
+monthly_totals for scaling
+
+Weather features
+
+temp_c, temp_sq (to capture non-linearity), degree days (HDD, CDD), ghi (solar)
+
+Customer features
+
+pv_capacity_kw, battery_kwh, ev_flag, dwelling_type, concession_flag
+
+Network features
+
+feeder_peak_pct, local_pv_share
+
+Notes: Ensure features that won’t exist for old-meter customers are not mandatory for inference; create feeder-aggregates as proxies.
+
+Step 3 — Forecasting model training (per-cluster)
+
+Goal: predict hourly kWh for each customer or cluster.
+
+Model choices:
+
+Primary: LightGBM (fast, explainable, supports quantile via custom objectives or use LightGBM quantile plugin).
+
+Secondary: LSTM/Transformer for customers with long history and complex temporal dependencies (optional, for high-value customers).
+
+Probabilistic: Quantile regression or Ensemble (bootstrap) to get 5/50/95 quantiles.
+
+Training details (LightGBM):
+
+Features: engineered features above + customer_id as categorical (only if serving smart-meter customers); prefer cluster_id.
+
+Objective: regression (MAE) or quantile.
+
+Hyperparameters (starting point):
+
+learning_rate = 0.05
+
+num_leaves = 31
+
+max_depth = 10
+
+n_estimators/num_boost_round = 1000 with early stopping on validation (50 rounds)
+
+feature_fraction = 0.8, bagging_fraction = 0.8, bagging_freq = 5
+
+Cross-validation: rolling time split (train on first 80% time, validate on next 10%, test on last 10%). Use group CV to avoid leakage (group by customer if per-customer models).
+
+Loss / metrics to monitor:
+
+MAE overall (kWh)
+
+MAE on peak hours (top 10% hours)
+
+RMSE
+
+Pinball loss for quantiles
+
+Step 4 — Elasticity estimation (behavioural response)
+
+Goal: estimate short-run price elasticity by cluster and time-of-day.
+
+Approaches:
+
+If historical price variation exists: use log-log regression Δlog(Q) = ε * Δlog(P) + controls. Controls: temp, hour dummies, weekend, holiday, lag consumption.
+
+If weak price variation: design small randomized price pilots (preferred) or use instrumental variable (IV) approach (use exogenous cost shocks as instrument).
+
+Model: panel regression with customer fixed effects or difference-in-difference when evaluating pilot events.
+
+Outputs: elasticity matrix ε[cluster, time_of_day] with confidence intervals.
+
+Step 5 — Imputation pipeline for old-meter customers
+
+Procedure (deterministic + probabilistic):
+
+Map each old-meter customer to a cluster using available attributes (postcode → feeder → cluster distribution). Use feeder-level cluster proportions as priors.
+
+For each customer, use the cluster-level forecasting model to generate hourly shape for the billing period given weather.
+
+Scale the hourly vector so sum equals recorded monthly/quarterly kWh. If only feeder-aggregates available, scale at feeder-level to ensure reconciliation.
+
+For uncertainty, generate N samples by:
+
+sampling quantiles from predictive distribution; or
+
+sampling model with bootstrap; or
+
+sampling cluster assignment if ambiguous.
+
+Validation: backtest by selecting a hold-out set of smart-meter customers, strip hourly data leaving only monthly totals, run imputation, then compare imputed hourly to true hourly.
+
+Metrics: MAE on hourly, MAE on monthly (should be zero if scaled), peak-hour recovery error.
+
+Step 6 — Bill simulation
+
+Implementation:
+
+Implement billing engine that:
+
+Loads hourly kWh vector
+
+Applies tariff rules (band definitions, price per band, fixed charge, demand charge calculation, ratchets, feed-in tariffs, GST rules)
+
+Produces line item bills and total monthly charge.
+
+Edge cases: meter timezone, DST, partial months, feed-in export accounting.
+
+Step 7 — Tariff optimiser (prescriptive)
+
+Model formulation (convex approximation):
+
+Decision variables: fixed monthly charge F, energy prices p_peak, p_shoulder, p_offpeak, optional demand charge d.
+
+Objective (scalarised multi-objective): min λ1*Peak(D(p)) + λ2*Var(BillChange) + λ3*|Revenue(p)-R_target|.
+
+Constraints:
+
+Revenue(p) ≥ R_min
+
+BillChange_vulnerable ≤ δ
+
+monotonicity: p_peak ≥ p_shoulder ≥ p_offpeak
+
+regulatory price bounds
+
+Solvers: CVXPY with ECOS/SCS for convex forms; Gurobi for MIP or non-convex.
+
+Robustness: run scenario set (weather extremes, EV uptake, PV growth). Solve for expected objective across scenarios or compute worst-case.
+
+Step 8 — Evaluation & reporting
+
+KPIs to compute:
+
+Peak reduction (kW, %)
+
+Revenue shortfall (%) and variance
+
+Mean and median bill change and distribution by cluster & concession flag
+
+Number of customers with bill increase > 5/10/20%
+
+Fairness indices (Gini on bill changes)
+
+Reporting: produce regulatory-ready tables: per-tariff bill impacts, fairness analysis, sensitivity charts.
+
+Step 9 — Deployment & monitoring
+
+Schedule weekly/monthly retraining (based on drift).
+
+Monitor: data completeness, model MAE on new smart-meter data, KPI drift.
+
+Log explanations: SHAP for LightGBM to explain drivers of predictions.
