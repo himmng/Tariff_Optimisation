@@ -1,0 +1,5 @@
+tariff_plan,fixed_charge_per_day,peak_rate,offpeak_rate
+A1,0.987,0.28,0.2
+MiddaySaver,1.1,0.25,0.18
+EVPlan,1.15,0.22,0.15
+Solar,1.2,0.1,0.05
